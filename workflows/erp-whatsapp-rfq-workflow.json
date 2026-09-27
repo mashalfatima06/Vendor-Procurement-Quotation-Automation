@@ -1,0 +1,692 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "id": "c757c553-7d58-4632-a537-66487fbe0952",
+      "typeVersion": 1.1,
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 1: Normalize input ────────────────────────────────────────\n// Workflow 1 sends { items: [...] } as a single payload\nconst payload = $input.first().json;\nlet rawItems = [];\n\nif (Array.isArray(payload.items)) {\n  rawItems = payload.items;\n} else if (Array.isArray(payload)) {\n  rawItems = payload;\n} else {\n  throw new Error('No items received from Workflow 1. Payload: ' + JSON.stringify(payload));\n}\n\nif (rawItems.length === 0) {\n  throw new Error('Workflow 2 received an empty items array.');\n}\n\n// Cast types and return one item per row\nreturn rawItems.map(item => ({\n  json: {\n    icode                : Number(item.icode),\n    item_name            : String(item.item_name ?? `Item ${item.icode}`),\n    required_to_reach_min: Number(item.required_to_reach_min ?? 0),\n    uom                  : String(item.uom ?? 'PCS'),\n    sono                 : item.sono ?? null,\n    soid                 : item.soid ?? null\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "3dbd23a2-97ed-43bb-9d6e-dcd7a7864ca7",
+      "name": "Normalize Input Items"
+    },
+    {
+      "parameters": {
+        "url": "=http://YOUR_ERP_API_HOST:8000/vendors/items/{{$json.icode}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        448,
+        0
+      ],
+      "id": "8a6dfd82-d473-437e-9a5d-35db322abf30",
+      "name": "Fetch Vendors Per Item",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 2: Merge item metadata + vendor response ──────────────────\n// At this point each item flowing in IS the vendor API response.\n// We re-fetch the original item from Normalize Input Items using\n// the same index position — no pairedItem needed.\n\nconst vendorResponses = $input.all();\nconst originalItems   = $('Normalize Input Items').all();\n\n// Build vendor map grouped by vendor_code\nconst vendorMap = {};\n\nfor (let i = 0; i < vendorResponses.length; i++) {\n  const vendorResp = vendorResponses[i].json;\n  const origItem   = originalItems[i]?.json;\n\n  if (!origItem) continue;\n\n  // Handle both response shapes: flat array OR { vendors: [] }\n  let vendors = [];\n  if (Array.isArray(vendorResp)) {\n    vendors = vendorResp;\n  } else if (Array.isArray(vendorResp?.vendors)) {\n    vendors = vendorResp.vendors;\n  } else if (Array.isArray(vendorResp?.data)) {\n    vendors = vendorResp.data;\n  }\n  // If still empty, this item has no vendors — skip silently\n  if (vendors.length === 0) continue;\n\n  for (const v of vendors) {\n    const vendor_code  = (v.chcode ?? '').trim();\n    const phone_number = (v.mobile ?? v.phone ?? '').trim();\n\n    if (!vendor_code)  continue;  // must have vendor_code\n    if (!phone_number) continue;  // must have phone for WhatsApp\n\n    if (!vendorMap[vendor_code]) {\n      vendorMap[vendor_code] = {\n        vendor_code,\n        vendor_name   : String(v.name ?? vendor_code),\n        phone_number  : String(phone_number),\n        contact_person: v.contact_person ?? null,\n        items         : [],\n        _seen         : new Set()\n      };\n    }\n\n    // Dedupe: one row per vendor+icode combo\n    const dedupeKey = `${vendor_code}|${origItem.icode}`;\n    if (vendorMap[vendor_code]._seen.has(dedupeKey)) continue;\n    vendorMap[vendor_code]._seen.add(dedupeKey);\n\n    vendorMap[vendor_code].items.push({\n      icode        : origItem.icode,\n      item_name    : origItem.item_name,\n      required_qty : origItem.required_to_reach_min,\n      uom          : origItem.uom,\n      sono         : origItem.sono,\n      soid         : origItem.soid,\n      vendor_code\n    });\n  }\n}\n\nconst result = Object.values(vendorMap).map(v => {\n  delete v._seen;\n  return { json: v };\n});\n\nif (result.length === 0) {\n  throw new Error('No vendors with valid phone numbers found for any item.');\n}\n\nreturn result;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        0
+      ],
+      "id": "94bca01d-f2af-485e-aba8-aed5bebb24af",
+      "name": "Group Items By Vendor"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 3: Build demand items (unique by icode) + store vendor list\n// We need one demand POST with all unique items.\n// Vendor list is stored here and passed forward.\n\nconst vendors = $input.all().map(i => i.json);\n\nconst seenIcodes  = new Set();\nconst demandItems = [];\n\nfor (const vendor of vendors) {\n  for (const item of vendor.items) {\n    if (!seenIcodes.has(item.icode)) {\n      seenIcodes.add(item.icode);\n      demandItems.push({\n        icode        : item.icode,\n        item_name    : item.item_name,\n        required_qty : item.required_qty,\n        uom          : item.uom\n      });\n    }\n  }\n}\n\nreturn [{\n  json: {\n    demand_items: demandItems,\n    vendors\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        928,
+        0
+      ],
+      "id": "87297ec0-417b-4d00-ae17-c1d4fc20f3f9",
+      "name": "Prepare Demand Payload",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://YOUR_ERP_API_HOST:8000/rfq/demand",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"e_user\": \"YOUR_ERP_USER_ID\",\n  \"emp_code\": \"YOUR_ERP_EMP_CODE\",\n  \"dept_id\": \"YOUR_ERP_DEPT_ID\",\n  \"items\": {{ JSON.stringify($json.demand_items) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1168,
+        0
+      ],
+      "id": "8595bf0e-ff51-4071-90dd-910496a1810c",
+      "name": "Create Demand",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 4: Validate demand_id, attach to each vendor as separate items\nconst erpResp   = $input.first().json;\nconst demand_id = erpResp.demand_id ?? erpResp.id ?? null;\n\nif (!demand_id) {\n  throw new Error('Demand creation failed — no demand_id in response: ' + JSON.stringify(erpResp));\n}\n\n// Pull vendor list from Prepare Demand Payload node\nconst vendors = $('Prepare Demand Payload').first().json.vendors;\n\n// Return one item per vendor, each carrying the demand_id\nreturn vendors.map(vendor => ({\n  json: {\n    demand_id,\n    vendor_code   : vendor.vendor_code,\n    vendor_name   : vendor.vendor_name,\n    phone_number  : vendor.phone_number,\n    contact_person: vendor.contact_person,\n    items         : vendor.items\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1408,
+        0
+      ],
+      "id": "c473f115-ee6b-44fe-98a6-40f0e9a87137",
+      "name": "Attach Demand ID To Vendors",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 5: Chunk vendor items into groups of 8 for WhatsApp\nconst CHUNK_SIZE = 8;\nconst vendor = $input.item.json;\n\nconst chunks = [];\nfor (let i = 0; i < vendor.items.length; i += CHUNK_SIZE) {\n  const slice = vendor.items.slice(i, i + CHUNK_SIZE);\n  const lines = slice.map(item => {\n    const qty  = Number(item.required_qty) || 0;\n    const qStr = qty > 0 ? `${qty.toFixed(1)} ${item.uom || 'PCS'}` : '-';\n    const name = item.item_name\n      .replace(/\\\\/g, '')\n      .replace(/\"/g,  \"''\")\n      .replace(/[\\x00-\\x1F\\x7F]/g, '')\n      .trim();\n    return `*➤ (icode=${item.icode})* | ${name} | _*Qty:*_ _${qStr}_`;\n  });\n  chunks.push({ items: slice, items_text: lines });\n}\n\n// Return the full vendor with chunks embedded — still one item per vendor\nreturn [{\n  json: {\n    demand_id    : vendor.demand_id,\n    vendor_code  : vendor.vendor_code,\n    vendor_name  : vendor.vendor_name,\n    phone_number : vendor.phone_number,\n    items        : vendor.items,\n    chunks\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        272
+      ],
+      "id": "51ee919b-63ea-4de5-b8f7-9133908efe45",
+      "name": "Chunk Vendor Items"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        272,
+        272
+      ],
+      "id": "32183ca1-2ff3-4021-ba7a-d86fbfdcffd9",
+      "name": "Loop Over Vendors"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v17.0/YOUR_WHATSAPP_PHONE_NUMBER_ID/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ \"messaging_product\": \"whatsapp\", \"to\": $('Loop Over Vendors').item.json.phone_number, \"type\": \"template\", \"template\": { \"name\": \"po_new\", \"language\": { \"code\": \"en\" }, \"components\": [{ \"type\": \"body\", \"parameters\": [{ \"type\": \"text\", \"text\": $('Loop Over Vendors').item.json.vendor_name }] }] } }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        480,
+        304
+      ],
+      "id": "b1842074-6354-4c08-869d-46e79affd6b2",
+      "name": "Send Greeting WhatsApp",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 6: Expand chunks into individual messages\n// One output row per chunk so sub-template sends each chunk separately\nconst vendor = $('Loop Over Vendors').item.json;\n\nreturn vendor.chunks.map((chunk, idx) => {\n  const itemsText = chunk.items_text\n    .map(t => t.replace(/[*_]/g, '').trim())\n    .join(' | ');\n\n  return {\n    json: {\n      phone_number : vendor.phone_number,\n      vendor_code  : vendor.vendor_code,\n      vendor_name  : vendor.vendor_name,\n      demand_id    : vendor.demand_id,\n      list_number  : String(idx + 1),\n      items_text   : itemsText,\n      chunk_items  : chunk.items\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        288
+      ],
+      "id": "a86d0902-433a-4a46-a244-bbdb5646e959",
+      "name": "Expand Chunks Into Messages"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v17.0/YOUR_WHATSAPP_PHONE_NUMBER_ID/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $json.phone_number }}\",\n  \"type\": \"template\",\n  \"template\": {\n    \"name\": \"remaining_items\",\n    \"language\": { \"code\": \"en\" },\n    \"components\": [\n      {\n        \"type\": \"body\",\n        \"parameters\": [\n          { \"type\": \"text\", \"text\": \"{{ $json.list_number }}\" },\n          { \"type\": \"text\", \"text\": \"{{ $json.items_text }}\" }\n        ]\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        816,
+        288
+      ],
+      "id": "f86aec5f-eda5-44c3-a25a-b2a5a523f461",
+      "name": "Send Item Chunk Template",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 7: Expand chunk_items into individual rows for ERP quotation\n// Each item in the chunk needs its own quotation record\nconst chunk = $input.item.json;\n\nreturn chunk.chunk_items.map((item, idx) => ({\n  json: {\n    icode        : item.icode,\n    item_name    : item.item_name,\n    required_qty : item.required_qty,\n    uom          : item.uom,\n    sono         : item.sono ?? null,\n    soid         : item.soid ?? null,\n    vendor_code  : chunk.vendor_code,\n    vendor_name  : chunk.vendor_name,\n    phone_number : chunk.phone_number,\n    demand_id    : chunk.demand_id\n  },\n  pairedItem: { item: idx }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        288
+      ],
+      "id": "822aa193-da19-4637-ae7d-56c62ace754b",
+      "name": "Expand Items For Quotation"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://YOUR_ERP_API_HOST:8000/inventory/stock/{{$json.icode}}/msg-sent",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"msg_sent\": \"YES\" }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1184,
+        208
+      ],
+      "id": "2efe64ab-d183-4685-85db-5b146b0ec361",
+      "name": "Mark Msg Sent ERP",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/quotations/by-icode/{{$json.icode}}/sent",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"quotation_sent\": true }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1184,
+        336
+      ],
+      "id": "74b080e5-cdb9-450b-9c9d-9072e3d43480",
+      "name": "Mark Quotation Sent Postgres",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1456,
+        272
+      ],
+      "id": "f0cec191-e27c-4268-8d96-6100cade9e57",
+      "name": "Merge Mark Nodes"
+    },
+    {
+      "parameters": {
+        "jsCode": "// After merge, restore full item context from Expand Items For Quotation\n// merge output keeps input0 data (Mark Msg Sent ERP response)\n// We need to re-attach vendor_code, demand_id etc from the expand node\n// Both branches had same index items so we use position matching\n\nconst mergedItems = $input.all();\nconst expandedItems = $('Expand Items For Quotation').all();\n\nreturn mergedItems.map((item, idx) => {\n  const ctx = expandedItems[idx]?.json ?? {};\n  return {\n    json: {\n      icode        : ctx.icode,\n      item_name    : ctx.item_name,\n      required_qty : ctx.required_qty,\n      uom          : ctx.uom,\n      sono         : ctx.sono ?? null,\n      soid         : ctx.soid ?? null,\n      vendor_code  : ctx.vendor_code,\n      vendor_name  : ctx.vendor_name,\n      phone_number : ctx.phone_number,\n      demand_id    : ctx.demand_id\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        32,
+        576
+      ],
+      "id": "3b507d7a-1140-4738-a3d8-0e8a774d4293",
+      "name": "Restore Item Context After Merge"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://YOUR_ERP_API_HOST:8000/rfq/demand/{{$json.demand_id}}/quotations",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"vendor_code\": \"{{ $json.vendor_code }}\",\n  \"e_user\": \"YOUR_ERP_USER_ID\",\n  \"emp_code\": \"YOUR_ERP_EMP_CODE\",\n  \"dept_id\": \"YOUR_ERP_DEPT_ID\",\n  \"trn_date\": \"{{ new Date().toISOString().split('T')[0] }}\",\n  \"remarks\": \"Auto-generated quotation request\"\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        192,
+        592
+      ],
+      "id": "d5baf333-b241-488f-a864-804d77833e20",
+      "name": "Create Quotation ERP"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── STEP 8: Validate ERP response, attach quotation_id to item context\nconst erpResp       = $input.item.json;\nconst quotation_id  = erpResp.quotation_id ?? null;\nconst quotation_number = erpResp.quotation_number ?? null;\n\nif (!quotation_id) {\n  throw new Error(\n    `ERP quotation creation failed for vendor ${$('Restore Item Context After Merge').item.json.vendor_code}: ` +\n    JSON.stringify(erpResp)\n  );\n}\n\n// Recover item context — input is the ERP response, use index matching\nconst ctx = $('Restore Item Context After Merge').item.json;\n\nreturn [{\n  json: {\n    quotation_id,\n    quotation_number,\n    icode         : ctx.icode,\n    vendor_code   : ctx.vendor_code,\n    vendor_name   : ctx.vendor_name,\n    vendor_contact: ctx.phone_number,\n    qty           : ctx.required_qty,\n    soid          : ctx.soid ?? null,\n    sono          : ctx.sono ?? null,\n    demand_id     : ctx.demand_id\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        592
+      ],
+      "id": "f5860c97-612e-4b21-8df1-00ae07dbb64b",
+      "name": "Attach Quotation ID"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/quotations/by-icode/{{$json.icode}}/quotation-id",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"quotation_id\"  : \"{{ $json.quotation_id }}\",\n  \"vendor_code\"   : \"{{ $json.vendor_code }}\",\n  \"vendor_name\"   : \"{{ $json.vendor_name }}\",\n  \"vendor_contact\": \"{{ $json.vendor_contact }}\",\n  \"qty\"           : {{ $json.qty }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        704,
+        480
+      ],
+      "id": "a6faf770-44b4-44a9-aedc-a62cbc9478cf",
+      "name": "Update Quotation ID Postgres",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/quotation-sent-vendor/{{$json.vendor_code}}/quotation-id",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"quotation_id\": \"{{ $json.quotation_id }}\" }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        720,
+        640
+      ],
+      "id": "fd841e80-0219-4415-8c42-88adbdcedd9a",
+      "name": "Update Vendor Quotation ID",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1040,
+        624
+      ],
+      "id": "d60fef0c-5b67-47ce-8c8d-0f40d5b51f27",
+      "name": "Merge Quotation Updates"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Re-attach quotation context for SOID update\n// Both merge inputs had same items — use Attach Quotation ID as source of truth\nconst ctx = $('Attach Quotation ID').item.json;\nreturn [{\n  json: {\n    quotation_id: ctx.quotation_id,\n    soid        : ctx.soid ?? null\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1216,
+        608
+      ],
+      "id": "d850381a-7aaa-422d-ad0b-e44a9d951923",
+      "name": "Restore Context For SOID"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/quotations/by-quotation-id/{{$json.quotation_id}}/soid",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"soid\": \"{{ $json.soid }}\" }",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1456,
+        608
+      ],
+      "id": "5aa9a092-f12e-49b9-b7fb-00b7d8c1541e",
+      "name": "Update SOID",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "amount": 6
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1872,
+        672
+      ],
+      "id": "c44934f9-10db-4b51-b513-1d89e96a87a2",
+      "name": "Wait 6s",
+      "webhookId": "2751bc18-ec3e-49c8-b5e9-f8f1398045c3"
+    }
+  ],
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input Items": {
+      "main": [
+        [
+          {
+            "node": "Fetch Vendors Per Item",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Vendors Per Item": {
+      "main": [
+        [
+          {
+            "node": "Group Items By Vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Items By Vendor": {
+      "main": [
+        [
+          {
+            "node": "Prepare Demand Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Demand Payload": {
+      "main": [
+        [
+          {
+            "node": "Create Demand",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Demand": {
+      "main": [
+        [
+          {
+            "node": "Attach Demand ID To Vendors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Demand ID To Vendors": {
+      "main": [
+        [
+          {
+            "node": "Chunk Vendor Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Vendor Items": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Vendors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Vendors": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Send Greeting WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Greeting WhatsApp": {
+      "main": [
+        [
+          {
+            "node": "Expand Chunks Into Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Chunks Into Messages": {
+      "main": [
+        [
+          {
+            "node": "Send Item Chunk Template",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Item Chunk Template": {
+      "main": [
+        [
+          {
+            "node": "Expand Items For Quotation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Items For Quotation": {
+      "main": [
+        [
+          {
+            "node": "Mark Msg Sent ERP",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mark Quotation Sent Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Msg Sent ERP": {
+      "main": [
+        [
+          {
+            "node": "Merge Mark Nodes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Quotation Sent Postgres": {
+      "main": [
+        [
+          {
+            "node": "Merge Mark Nodes",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Mark Nodes": {
+      "main": [
+        [
+          {
+            "node": "Restore Item Context After Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Item Context After Merge": {
+      "main": [
+        [
+          {
+            "node": "Create Quotation ERP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Quotation ERP": {
+      "main": [
+        [
+          {
+            "node": "Attach Quotation ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Quotation ID": {
+      "main": [
+        [
+          {
+            "node": "Update Quotation ID Postgres",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Update Vendor Quotation ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Quotation ID Postgres": {
+      "main": [
+        [
+          {
+            "node": "Merge Quotation Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Vendor Quotation ID": {
+      "main": [
+        [
+          {
+            "node": "Merge Quotation Updates",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Quotation Updates": {
+      "main": [
+        [
+          {
+            "node": "Restore Context For SOID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Context For SOID": {
+      "main": [
+        [
+          {
+            "node": "Update SOID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update SOID": {
+      "main": [
+        [
+          {
+            "node": "Wait 6s",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 6s": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Vendors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

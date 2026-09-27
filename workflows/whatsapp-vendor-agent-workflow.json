@@ -1,0 +1,578 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=incoming message:\n{{ $('Webhook').item.json.body.entry[0].changes[0].value.messages[0].text.body }}\nNO TOOLS\n\n",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a classification agent. Analyze the incoming vendor message and do the following:\n\n1. Classify language: \"english\", \"urdu\", or \"roman urdu\".\n   - \"roman urdu\" = Urdu written in Latin/English letters (e.g. \"kia apky pass hain\").\n   - \"urdu\" = native Urdu script (اردو).\n   - \"english\" = English.\n\n2. Classify type as either:\n   - \"text\" = a casual vendor message (greeting, question, negotiation, confirmation, follow-up — all count as \"text\").\n   - \"quotation\" = a vendor message containing item codes AND prices\n     (e.g. \"Icode 1202 = 4 PKR\").\n\n3. Item extraction:\n   If the message is a casual vendor query naming or implying a product, extract\n   the item(s) in English, comma-separated, no matter what language the\n   vendor used. Do not split multi-word item descriptions across commas.\n\n   Important: a message can name a product even if it's wrapped in\n   hesitation, negation, scheduling language, or indirect phrasing. Always\n   scan the FULL message for a product noun before deciding items is empty\n   — do not let words like \"nahi\", \"abhi nahi\", \"baad mein\", \"phir dekhta\n   hoon\" cause you to miss a product name elsewhere in the same sentence.\n\n   If the message does NOT name a product but is clearly a short follow-up\n   (e.g. \"sasty dikhao\", \"koi aur company\", \"yeh mehnga hai\", \"aur options\",\n   a bare number, \"kitna rate hai\"), still return items as an empty string\n   — this classifier has no visibility into prior messages, so downstream\n   logic (not you) will resolve the follow-up using chat history.\n\n   Only extract items when the CURRENT message itself names or clearly\n   implies a specific product.\n\n   Examples:\n   - \"ni abhi ni phly cameras ki detail mil jayen then i will decide\"\n     → items: \"camera\" (product IS named, despite the hesitant framing)\n   - \"abhi nahi, baad mein sochta hoon\"\n     → items: \"\" (no product named anywhere — correctly empty)\n   - \"pehle price bata dein phir decide karunga\"\n     → items: \"\" (no product named — this is a genuine empty case)\n   - \"kia apky pass solar panels hain??\"\n     → items: \"solar panel\"\n   - \"sasty dikhao\"\n     → items: \"\" (follow-up, no product named in this message itself)\n\nOutput ONLY this JSON, nothing else:\n\n{\n \"language\": \"english\",\n \"type\": \"text\",\n \"items\": \"solar panel 550w,inverter\"\n}\n\nIf no items exist:\n\n{\n \"language\": \"english\",\n \"type\": \"text\",\n \"items\": \"\"\n}\n\nRules:\n- Always translate items to English.\n- Never invent or guess an item that wasn't named or clearly implied."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -1616,
+        160
+      ],
+      "id": "41ed1759-03f5-4d34-8307-95bf436c770f",
+      "name": "AI Agent2",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "phoneNumberId": "",
+        "recipientPhoneNumber": "={{ $('Webhook').item.json.body.entry[0].changes[0].value.messages[0].from }}",
+        "textBody": "={{ $json.output }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "ba448c16-81ac-4c64-93d1-63583b2aeb1a",
+      "name": "Send message2",
+      "webhookId": "cd3e4ba8-eac1-4b7f-8b3d-13f44ff4c7d7"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f62ec980-816f-4e9f-b05d-304be9f4738e",
+              "leftValue": "={{ $('AI Agent2').item.json.output.type }}",
+              "rightValue": "text",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -368,
+        16
+      ],
+      "id": "a773fc60-8633-4e91-b659-a889ccad9319",
+      "name": "If3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://YOUR_INTERNAL_API_HOST:8765/api/messages/outbound",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "to_phone",
+              "value": "=+{{ $json.contacts[0].wa_id }}"
+            },
+            {
+              "name": "body",
+              "value": "={{ $('AI Agent3').item.json.output }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        208,
+        0
+      ],
+      "id": "c6bc3d43-9d96-4c88-a862-5792f36835ae",
+      "name": "HTTP Request5"
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n\t\"type\": \"Text or Quotation\",\n\t\"items\": \"item1, item2, item3\",\n    \"language\": \"urdu, romanized urdu, english\"\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -1504,
+        384
+      ],
+      "id": "dcedecde-5947-4cde-b9a8-8566b1420db1",
+      "name": "Structured Output Parser1"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/quotations/by-icode/{{ $json.icode }}/vendor-details",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "vendor_name",
+              "value": "={{ $json.vendor_name }}"
+            },
+            {
+              "name": "vendor_code",
+              "value": "={{ $json.vendor_code }}"
+            },
+            {
+              "name": "vendor_contact",
+              "value": "={{ $json.vendor_contact }}"
+            },
+            {
+              "name": "proposed_rate",
+              "value": "={{ $json.proposed_rate }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        16,
+        384
+      ],
+      "id": "34135743-b0f9-4676-8305-01e1d04a1764",
+      "name": "save_quotation1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=message: {{ $('HTTP Request').item.json.body }}\ntype: {{ $('AI Agent2').item.json.output.type }}\n\nCall the memory tool now to retrieve the last few messages for this chat before responding, so you can correctly handle follow-up questions.",
+        "options": {
+          "systemMessage": "You are handling vendor communications for [CLIENT_COMPANY_NAME]'s procurement side.\n\nInputs you receive:\n- message: the vendor's current message\n- type: \"text\" (casual vendor message) or \"quotation\" (vendor has sent item codes with prices)\n- memory tool: call it to see recent chat history with this vendor\n\n--------------------------------\n\nVENDOR QUOTATION\n\nIf type = \"quotation\":\n\nExtract every item code and its price from the message and return ONLY\nthis JSON, no extra text, no greeting, no explanation:\n\n[\n  { \"icode\": \"item_code\", \"proposed_rate\": price }\n]\n\nExtract every icode/price pair present, even if there are multiple. Do not\ninvent codes or prices that aren't explicitly in the message. Do not\nconvert currency or reformat numbers.\n\n--------------------------------\n\nVENDOR CASUAL MESSAGE\n\nIf type = \"text\" (a normal message from the vendor — greeting, question,\nnegotiation, confirmation, small talk):\n\nReply naturally and briefly, like a real procurement contact texting on\nWhatsApp — not a formal customer-service script.\n\nUse the memory tool to check recent history so your reply makes sense in\ncontext (e.g. if they're following up on a quote they sent earlier, or\nasking whether their rates were received).\n\nDo NOT invent item names, prices, or availability information — you have\nno product catalog access in this flow. If the vendor asks something you\ndon't have data for (e.g. \"kitne pieces chahiye\" without prior context),\nask them to clarify or say you'll confirm and follow up.\n\n--------------------------------\n\nLANGUAGE\n\nEnglish message → reply in English.\nUrdu or Roman Urdu message → reply in Roman Urdu.\n\n--------------------------------\n\nSTYLE\n\n- Write like a real person texting on WhatsApp, not a translated formal\n  sentence. Short, casual, natural Roman Urdu — the way people actually\n  type, not textbook-correct grammar.\n- Keep it brief — 1-2 short lines.\n- One response only, do not repeat greetings across messages.\n- Professional and polite, but not stiff.\n- Banned phrases: \"maaf kijiyega\", \"not available\", \"sorry I don't have.\"\n\nExamples of tone:\n❌ Robotic: \"Waalikum assalam. Kya main aapki kisi cheez mein madad kar sakta hoon?\"\n✅ Natural: \"Waalaikum salam! Ji farmayen.\"\n\n❌ Robotic: \"Aapka message mujhe mil gaya hai, main jald hi jawab doon ga.\"\n✅ Natural: \"Ji mil gaya, thodi dair mein confirm karta hoon.\""
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -928,
+        144
+      ],
+      "id": "00060f5b-e2df-4113-9099-b8fa926c89e9",
+      "name": "AI Agent3",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "toolDescription": "Returns Chat history for a certain chat for context",
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/messages/by-phone?phone_e164={{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}&limit=3",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.3,
+      "position": [
+        -720,
+        368
+      ],
+      "id": "c-e333cbf0f735",
+      "name": "memory1"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {
+          "maxTokens": 600
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -1664,
+        400
+      ],
+      "id": "-7a41876a360c",
+      "name": "OpenAI Chat Model2"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "builtInTools": {},
+        "options": {
+          "maxTokens": 1600
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -1056,
+        352
+      ],
+      "id": "4f-135e31804b1c",
+      "name": "OpenAI Chat Model3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://YOUR_ERP_API_HOST:8000/vendors/lookup-by-mobile",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "mobile",
+              "value": "={{ $('Webhook').item.json.body.entry[0].changes[0].value.messages[0].from }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -400,
+        256
+      ],
+      "id": "ea30f6c5-bc1a-4d1e-8d3d-941ab92c7db8",
+      "name": "vendor details1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const agentRaw = $items(\"AI Agent3\")[0].json.output;\nconst vendor = $items(\"vendor details1\")[0].json;\n\nlet items = [];\ntry {\n  const jsonMatch = agentRaw.match(/\\[([\\s\\S]*)\\]/);\n  items = jsonMatch ? JSON.parse(jsonMatch[0]) : [];\n} catch (e) {\n  items = [];\n}\n\nreturn items.map(item => ({\n  json: {\n    vendor_code: vendor.vendor_code,\n    vendor_name: vendor.vendor_name,\n    vendor_contact: vendor.mobile,\n    proposed_rate: item.proposed_rate,\n    icode: item.icode\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -208,
+        288
+      ],
+      "id": "5c2d8bc2-b637-473d-ada0-d4e1311a630a",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "phoneNumberId": "",
+        "recipientPhoneNumber": "={{ $json.vendor_contact }}",
+        "textBody": "Thanks for the quotation.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1.1,
+      "position": [
+        624,
+        304
+      ],
+      "id": "1545a650-e060-4e44-8c54-8368ea590974",
+      "name": "Send message3",
+      "webhookId": "606caa8d-7259-4f34-b1aa-d5ff2e1c2d7c"
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/quotation-replies/mark-replied-by-id-vendor?quotation_id={{ $json.quotation_id }}&vendor_code={{ $('Code in JavaScript1').item.json.vendor_code }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        416,
+        304
+      ],
+      "id": "73931bdb-de42-4a1d-8e33-ccdff3af2eb3",
+      "name": "HTTP Request6",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "url": "=http://YOUR_INTERNAL_API_HOST:8765/api/quotations/quotation-id/by-icode-vendor?icode={{ $json.icode }}&vendor_code={{ $json.vendor_code }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        208,
+        304
+      ],
+      "id": "ca40bf94-e094-425f-a71b-5402a367cc40",
+      "name": "HTTP Request7",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp-webhook",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2096,
+        112
+      ],
+      "id": "e0bd66be-0548-4e4d-b70f-24d89f699011",
+      "name": "Webhook1",
+      "webhookId": "e0cc127f-4c60-4576-a6d8-aa9af55710c9"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://YOUR_INTERNAL_API_HOST:8765/api/webhooks/whatsapp",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "from_phone",
+              "value": "=+{{ $json.body.entry[0].changes[0].value.messages[0].from }}"
+            },
+            {
+              "name": "body",
+              "value": "={{ $json.body.entry[0].changes[0].value.messages[0].text.body }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1856,
+        176
+      ],
+      "id": "a29f4780-9002-4065-b045-6d0ad5aa7178",
+      "name": "HTTP Request8"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9e64d073-d13a-4cb5-b71a-31e06ef86bde",
+              "leftValue": "={{ $json.body.entry[0].changes[0].value.messages[0].from }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1952,
+        32
+      ],
+      "id": "feff13fa-7c8c-498b-b731-8349153262a5",
+      "name": "If4"
+    }
+  ],
+  "connections": {
+    "AI Agent2": {
+      "main": [
+        [
+          {
+            "node": "AI Agent3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send message2": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request5",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If3": {
+      "main": [
+        [
+          {
+            "node": "Send message2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "vendor details1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser1": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent2",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "save_quotation1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request7",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent3": {
+      "main": [
+        [
+          {
+            "node": "If3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "memory1": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent3",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent2",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent3",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "vendor details1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "save_quotation1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request6": {
+      "main": [
+        [
+          {
+            "node": "Send message3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request7": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [
+          {
+            "node": "If4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request8": {
+      "main": [
+        [
+          {
+            "node": "AI Agent2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If4": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request8",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}

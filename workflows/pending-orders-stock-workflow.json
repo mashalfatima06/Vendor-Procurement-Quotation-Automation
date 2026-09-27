@@ -1,0 +1,392 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "url": "http://YOUR_ERP_API_HOST:8000/orders?status=PN",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1808,
+        224
+      ],
+      "id": "4af5402b-3ef3-4c0f-a53c-d8797de94e03",
+      "name": "Get Pending Orders",
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "http://YOUR_ERP_API_HOST:8000/inventory/stock",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1584,
+        224
+      ],
+      "id": "3ba3ecd3-0630-4546-b42a-3512c4b3ec06",
+      "name": "Get Stock Data",
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "http://YOUR_INTERNAL_API_HOST:8765/api/quotations/in-purchase?value=true",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1376,
+        224
+      ],
+      "id": "31ba4b70-5f4e-417b-a109-677429465f4e",
+      "name": "Get In-Purchase Items",
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "http://YOUR_INTERNAL_API_HOST:8765/api/quotation-sent-items/sent",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -1152,
+        224
+      ],
+      "id": "2db538ab-4823-41bf-a44d-b1f73268ba1d",
+      "name": "Get Quotation Sent Items",
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "let rawOrders       = [];\nlet stockData       = [];\nlet inPurchaseItems = [];\nlet sentItems       = [];\n\ntry { rawOrders       = $('Get Pending Orders').all().map(i => i.json);       } catch(e) {}\ntry { stockData       = $('Get Stock Data').all().map(i => i.json);           } catch(e) {}\ntry { inPurchaseItems = $('Get In-Purchase Items').all().map(i => i.json);    } catch(e) {}\ntry { sentItems       = $('Get Quotation Sent Items').all().map(i => i.json); } catch(e) {}\n\nif (!Array.isArray(rawOrders))       rawOrders       = rawOrders?.data       ?? [];\nif (!Array.isArray(stockData))       stockData       = stockData?.data       ?? [];\nif (!Array.isArray(inPurchaseItems)) inPurchaseItems = inPurchaseItems?.data ?? [];\nif (!Array.isArray(sentItems))       sentItems       = sentItems?.data       ?? [];\n\nif (rawOrders.length === 0) {\n  console.log('[OrderCheck] No pending orders found.');\n  return [{ json: { items: [], items_found: false, reason: 'no_pending_orders' } }];\n}\n\nif (stockData.length === 0) {\n  console.log('[OrderCheck] No stock data returned.');\n  return [{ json: { items: [], items_found: false, reason: 'no_stock_data' } }];\n}\n\n// Build stock map\nconst stockMap = new Map();\nfor (const s of stockData) stockMap.set(Number(s.icode), s);\n\nconst inPurchaseIcodes = new Set(inPurchaseItems.map(i => Number(i.icode)));\nconst sentIcodes = new Set(\n  sentItems.filter(i => i.quotation_sent === true).map(i => Number(i.icode))\n);\n\n// Aggregate ordered qty + sono/soid per icode\nconst orderQtyByIcode  = new Map();\nconst orderSonoByIcode = new Map();\nconst orderSoidByIcode = new Map();\n\nfor (const order of rawOrders) {\n  const items = Array.isArray(order.items) ? order.items\n              : Array.isArray(order)        ? order\n              : [];\n  for (const item of items) {\n    const icode = Number(item.icode);\n    const qty   = Number(item.quantity ?? 0);\n    orderQtyByIcode.set(icode, (orderQtyByIcode.get(icode) || 0) + qty);\n\n    if (order.sono) {\n      if (!orderSonoByIcode.has(icode)) orderSonoByIcode.set(icode, new Set());\n      orderSonoByIcode.get(icode).add(String(order.sono));\n    }\n    if (order.soid) {\n      if (!orderSoidByIcode.has(icode)) orderSoidByIcode.set(icode, new Set());\n      orderSoidByIcode.get(icode).add(String(order.soid));\n    }\n  }\n}\n\nconst result   = [];\nconst addedSet = new Set();\n\nfor (const [icode, totalOrderQty] of orderQtyByIcode) {\n  if (inPurchaseIcodes.has(icode)) continue;\n  if (sentIcodes.has(icode))       continue;\n  if (addedSet.has(icode))         continue;\n\n  const stock        = stockMap.get(icode);\n  const availableQty = Number(stock?.available_qty    ?? 0);\n  const min          = Number(stock?.minimum_threshold ?? 0);\n  const projectedQty = availableQty - totalOrderQty;\n\n  const isAlreadyLow  = availableQty <= min;\n  const willBeLow     = projectedQty  <  min;\n  const noStockRecord = !stock;\n\n  if (isAlreadyLow || willBeLow || noStockRecord) {\n    const raw = Math.max(min - projectedQty, 0) + totalOrderQty;\n    const required_to_reach_min = Math.ceil(raw * 100) / 100;\n    if (required_to_reach_min <= 0) continue;\n\n    const sono = orderSonoByIcode.has(icode)\n      ? [...orderSonoByIcode.get(icode)].join(', ') : null;\n    const soid = orderSoidByIcode.has(icode)\n      ? [...orderSoidByIcode.get(icode)].join(', ') : null;\n\n    result.push({\n      icode,\n      item_name            : stock?.iname ?? stock?.item_name ?? `Item ${icode}`,\n      required_to_reach_min,\n      uom                  : stock?.uom ?? 'PCS',\n      available_qty        : availableQty,\n      minimum_threshold    : min,\n      projected_after_order: projectedQty,\n      total_order_qty      : totalOrderQty,\n      flag_reason          : noStockRecord ? 'no_stock_record'\n                           : isAlreadyLow  ? 'already_low'\n                           : 'will_be_low',\n      sono,\n      soid\n    });\n    addedSet.add(icode);\n  }\n}\n\nconst items_found = result.length > 0;\nconsole.log(`[OrderCheck] ${result.length} items flagged. items_found=${items_found}`);\n\nreturn [{ json: { items: result, items_found, reason: items_found ? 'flagged_items_found' : 'all_stock_sufficient' } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -928,
+        224
+      ],
+      "id": "da36378b-cccb-4afe-b0bd-4c12be5eced0",
+      "name": "Check Orders Against Stock",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-items-found-b",
+              "leftValue": "={{ $json.items_found }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -688,
+        224
+      ],
+      "id": "1f3e2419-8546-403e-8e86-7619d688bafe",
+      "name": "Flagged Items Found?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// items_found = true — pass items to Vendor Quoting Workflow\nconst items = $json.items;\nconsole.log(`[OrderCheck] Sending ${items.length} items to Vendor Quoting Workflow.`);\nreturn [{ json: { items } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "3041b965-c750-46dc-9717-7fa9ebbe4efe",
+      "name": "Prepare Items Payload",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "YOUR_VENDOR_QUOTING_WORKFLOW_ID",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/YOUR_VENDOR_QUOTING_WORKFLOW_ID",
+          "cachedResultName": "Vendor Quoting Workflow"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "items": "={{ $json.items }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "items",
+              "displayName": "items",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "array",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "waitForSubWorkflow": false
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        208,
+        0
+      ],
+      "id": "99ef2b3e-e06a-45c2-80b2-4f386226b113",
+      "name": "Trigger Vendor Quoting Workflow"
+    },
+    {
+      "parameters": {
+        "url": "=http://YOUR_ERP_API_HOST:8000/orders/recipe-status?soid={{ $('Get Pending Orders').item.json.trnid }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -480,
+        80
+      ],
+      "id": "860cfc9e-d38b-4a7b-ae1a-ffb683e2ce2d",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ea9a5d99-3aa6-4b28-824a-5929cd58962e",
+              "leftValue": "={{$json.has_recipe}}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -272,
+        80
+      ],
+      "id": "0bedcc44-8860-41f3-b559-ed2d90ff22bc",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "workflow-a",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2000,
+        224
+      ],
+      "id": "4541dc0d-f3ac-4992-a690-10d49a8ad06c",
+      "name": "Webhook",
+      "webhookId": "81a22a13-985f-44de-b9d8-7b0241f163f9"
+    },
+    {
+      "parameters": {
+        "jsCode": "// items_found = false — log and stop\nconst reason = $json.reason ?? 'all_stock_sufficient';\nconsole.log(`[OrderCheck] Stopped: ${reason}`);\nreturn [{ json: { status: 'stopped', reason } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        336
+      ],
+      "id": "bfaea996-c59a-4b40-8e3c-64940e182085",
+      "name": "Log Nothing To Quote",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://YOUR_INTERNAL_API_HOST:8765/api/soid-recipe/log-missing",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        160
+      ],
+      "id": "6ddfb14b-348d-4654-bebe-137d46e38f0e",
+      "name": "HTTP Request2"
+    }
+  ],
+  "connections": {
+    "Get Pending Orders": {
+      "main": [
+        [
+          {
+            "node": "Get Stock Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Stock Data": {
+      "main": [
+        [
+          {
+            "node": "Get In-Purchase Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get In-Purchase Items": {
+      "main": [
+        [
+          {
+            "node": "Get Quotation Sent Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Quotation Sent Items": {
+      "main": [
+        [
+          {
+            "node": "Check Orders Against Stock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Orders Against Stock": {
+      "main": [
+        [
+          {
+            "node": "Flagged Items Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flagged Items Found?": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Nothing To Quote",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Items Payload": {
+      "main": [
+        [
+          {
+            "node": "Trigger Vendor Quoting Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Prepare Items Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get Pending Orders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}
